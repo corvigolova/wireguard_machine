@@ -8,9 +8,8 @@ import bcrypt
 import os
 import csv
 import io
-from typing import Optional
+
 from sqlmodel import Session, SQLModel, create_engine, select, column
-from typing import List
 from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks, Request, UploadFile
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,17 +17,20 @@ from fastapi.responses import RedirectResponse, FileResponse, Response
 from fastapi_utils.tasks import repeat_every
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
+from functools import lru_cache # Optional: for caching settings
+
 from server.models import SecurityConfig
 from server.models import Type_IP_List, IPListAccess
 from server.schemas import IP_List_Response, IP_List_Query, IP_List_Update, List_IP_List_Update, \
     List_IP_List_Update_response
-from server.schemas import ListClients, Client, ListClientsWithTotal, AccessListResponse
+from server.schemas import ListClients, ListClientsWithTotal, AccessListResponse, SyncAccessListResponse
 from server.handlers.midleware import SecurityMiddleware
 from server.wireguard_users import gen_users
-from server.utils import get_file_source, run_system_command, get_ip_next_server_config
-from server.utils import remove_client
+from server.utils import get_file_source
+from server.utils import remove_client, wl_fetch_url
 from server.user_statistics import status
 from server.ini_file_core import clients_scan, ServerConfig, ClientConfig
+from settings import AppSettings
 import ipaddress
 import datetime
 from sqlalchemy import func
@@ -64,6 +66,10 @@ def get_session():
     with Session(engine) as session:
         yield session
 
+# Instantiate settings
+@lru_cache() # Optional: cache settings for performance
+def get_settings():
+    return AppSettings()
 
 def get_ip_list(type_ip: Type_IP_List):
     ip_list = set()
@@ -72,12 +78,84 @@ def get_ip_list(type_ip: Type_IP_List):
         results = session.exec(statement)
         for row in results.all():
             try:
-                if ipaddress.ip_address(row.ip_addr):
-                    ip_list.add(row.ip_addr)
+                #logger.info(row.ip_addr)
+                #logger.info(len(row.ip_addr))
+                ip_ = row.ip_addr.replace('\ufeff', '').strip()
+                if ipaddress.ip_address(ip_):
+                    ip_list.add(ip_)
             except Exception as ex:
-                logger.warning(f"ошибка преобразования в IP - id:'{row.id}' IP:'{row.ip_addr}'")
+                logger.warning(f"ошибка преобразования в IP - id:'{row.id}' IP:'{ip_}'")
+                for char_ in ip_:
+                    logger.info(f"{char_} : {ord(char_)}")
     return [ip for ip in ip_list]
 
+@repeat_every(seconds=60*60, logger=logger)
+async def white_list_remote_sync():
+    """
+    получаем с удаленного сервера список доступа к гуишке и прописываем на сервере
+    :return:
+    """
+    logger.info("Синхронизация списка доступа")
+    result_ = {"added": [], "removed": []}
+    settings = get_settings()
+    result  = await wl_fetch_url(url=settings.WL_AUTO_UPDATE_URL, app_id=settings.AppID)
+    if not result:
+        mess = "Ничего не вернулось с сервера при синхронизации списка доступа"
+        logger.error(mess)
+        raise Exception(mess)
+
+    ip_list = List_IP_List_Update_response()
+    ip_list_set = set()
+    ip_list_in_db = List_IP_List_Update_response()
+    ip_list_in_db_set = set()
+    with Session(engine) as session:
+        # получаем все что есть в БД
+        statement = select(IPListAccess).where(IPListAccess.type_rec == Type_IP_List.whitelist)
+        for row in session.exec(statement).all():
+            try:
+                value = row.ip_addr.replace('\ufeff', '').strip()
+                ipadr = ipaddress.ip_address(value)
+                ip_row = IP_List_Response.model_validate({"ip_addr": ipadr, "id": row.id})
+                ip_list_in_db.items.append(ip_row)
+                ip_list_in_db_set.add(ipadr)
+            except ValueError:
+                pass
+        # получаем все что пришло
+        for row in result.split("\n"):
+            try:
+                value = row.replace('\ufeff', '').strip()
+                ipadr = ipaddress.ip_address(value)
+                ip = IP_List_Update.model_validate({"ip_addr": ipadr})
+                ip_list.items.append(ip)
+                ip_list_set.add(ipadr)
+            except ValueError:
+                pass
+        if ip_list_set:
+            need_add_to_db = ip_list_set.difference(ip_list_in_db_set)
+            need_remove_from_db = ip_list_in_db_set.difference(ip_list_set)
+            for ip_ in need_remove_from_db:
+                for row in ip_list_in_db.items:
+                    if row.ip_addr == ip_:
+                        rec = session.get(IPListAccess, row.id)
+                        if rec:
+                            session.delete(rec)
+                            session.commit()
+                            result_["removed"].append(rec)
+            for ip_ in need_add_to_db:
+                new_data = dict()
+                new_data["ip_addr"] = str(ip_)
+                new_data["type_rec"] = Type_IP_List.whitelist
+                rec = IPListAccess(**new_data)
+                session.add(rec)
+                session.commit()
+                session.flush(rec)
+                result_["added"].append(IP_List_Response(**{"id": rec.id, "ip_addr": rec.ip_addr}))
+
+            app.state.whitelist_list = get_ip_list(Type_IP_List.whitelist)
+            config.whitelist = app.state.whitelist_list
+    logger.info("Синхронизация списка доступа завершена")
+    logger.info(result_)
+    return result_
 
 @repeat_every(seconds=60)
 async def remove_expired_tokens_task(created_but_not_used_minutes=5):
@@ -133,8 +211,10 @@ async def remove_expired_tokens_task(created_but_not_used_minutes=5):
 async def lifespan(app: FastAPI):
     # create remove task by scheduller
     await remove_expired_tokens_task()
+    await white_list_remote_sync()
     yield
     # do any on finish
+
 
 
 description = """
@@ -161,13 +241,14 @@ description = """
 app = FastAPI(
     title="Wireguard Manager",
     description=description,
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
     # swagger_favicon_url="/favicon.ico"
 )
 app.state.whitelist_list = get_ip_list(Type_IP_List.whitelist)
+#print(app.state.whitelist_list)
 app.mount("/static", StaticFiles(directory="server/static"), name="static")
 templates = Jinja2Templates(directory="server/templates")
 
@@ -289,11 +370,21 @@ async def list_whitelist(request: Request, params: IP_List_Query = Depends()):
         if params.id:
             statement = statement.where(IPListAccess.id == params.id)
         heroes = session.exec(statement).all()
+    heroes = [{"id": row.id, "ip_addr": row.ip_addr.replace('\ufeff', '')} for row in heroes]
     resp = AccessListResponse(
         data=heroes
     )
     return resp
 
+@app.post("/whitelist_remote_sync",
+          tags=["access"],
+          description="синхронизация списка доступа с удаленным источником",
+          name="Синхронизация IP адресов"
+          )
+async def whitelist_remote_sync(response_model = SyncAccessListResponse):
+    res = await white_list_remote_sync()
+    resp = SyncAccessListResponse(added=res.get("added", []), removed=res.get("removed"))
+    return resp
 
 @app.post("/whitelist_file",
           tags=["access"],
@@ -333,7 +424,8 @@ def post_whitelist(params: List_IP_List_Update = Depends()):
         result = []
         for row in params.items:
             try:
-                new_data = row.model_dump(exclude_unset=True)
+                value = row.model_dump(exclude_unset=True)
+                new_data = {"ip_addr": str(value["ip_addr"])}
                 new_data["type_rec"] = Type_IP_List.whitelist
                 rec = IPListAccess(**new_data)
                 session.add(rec)
@@ -544,4 +636,4 @@ def del_all_cfg():
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=5000)

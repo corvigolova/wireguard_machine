@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 from sqlmodel import Column, Enum, Field
 from sqlalchemy import UniqueConstraint
+from ipaddress import ip_address
 
 def enum_values(enum_class) -> list:
     """Get values for enum."""
@@ -29,6 +30,16 @@ class IPListAccess(SQLModel, table=True):
                                                     type_= Enum(Type_IP_List, values_callable=enum_values),
                                                     )
                                    )
+
+    @field_validator('ip_addr')
+    @classmethod
+    def validate_ip_addr(cls, v):
+        try:
+            v_tr= ip_address(v)
+            print(f" {v} -> {v_tr}")
+            return v
+        except ValueError:
+            raise ValueError('Invalid IP address')
 
 class UserConfigs(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

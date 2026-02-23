@@ -1,20 +1,16 @@
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 from typing import Optional, List
 from pydantic import BaseModel, SerializeAsAny, computed_field
+from pydantic import IPvAnyAddress
 from server.utils import since1
 import datetime
 
 
 class IP_List_Response(SQLModel):
     id: Optional[int]
-    ip_addr: Optional[str]
+    ip_addr: Optional[IPvAnyAddress]
 
 class AccessListResponse(BaseModel):
-    #draw: int
-    #current_page: int
-    #per_page: int
-    #recordsTotal: int
-    #recordsFiltered: int
     data: Optional[List[IP_List_Response]] = []
 
 
@@ -24,7 +20,7 @@ class IP_List_Query(SQLModel):
 
 
 class IP_List_Update(SQLModel):
-    ip_addr: Optional[str]
+    ip_addr: Optional[IPvAnyAddress]
 
 
 class List_IP_List_Update(SQLModel):
@@ -32,7 +28,7 @@ class List_IP_List_Update(SQLModel):
 
 
 class List_IP_List_Update_response(SQLModel):
-    items: List[IP_List_Response]
+    items: List[IP_List_Response]= []
 
 
 class Client(BaseModel):
@@ -99,4 +95,9 @@ class StatisticClient(BaseModel):
 
 class ListStatisticClient(BaseModel):
     clients: Optional[List[StatisticClient]] = []
+
+class SyncAccessListResponse(BaseModel):
+    added: Optional[List[IP_List_Response]] = []
+    removed: Optional[List[IP_List_Response]] = []
+
 

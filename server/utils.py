@@ -8,6 +8,7 @@ from typing import Any, Optional, Union
 import subprocess
 import math
 import datetime
+import aiohttp
 
 from fastapi import Request
 
@@ -421,5 +422,16 @@ def remove_client(client, logger:logging.Logger, srv_cfg_file):
     #ip -4 route delete 10.101.1.2/32 dev wg0
     run_system_command(f'wg set wg0 peer "{pub_key}" remove')
     run_system_command(f'ip -4 route delete {client.allowed_ips} dev wg0')
+
+async def wl_fetch_url(url, app_id):
+    """получаем список доступа из удаленного источника"""
+    async with aiohttp.ClientSession() as session:
+        custom_headers = {"AppID": app_id, "User-Agent": "WireguardManager"}
+        async with session.get(url, headers=custom_headers) as response:
+            if response.status == 200:
+                return await response.text()
+            else:
+                logging.error(f"Error fetching {url}: Status code {response.status}")
+                return None
 
 

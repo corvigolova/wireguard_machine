@@ -76,6 +76,15 @@ Wireguard Manager
 
       pip install -r requirements.txt
 
+создаем файл .env 
+
+    nano .env
+
+прописываем в файле:
+
+    WL_AUTO_UPDATE_URL=...allowed_ips.json
+    AppID=<идентификатор приложения. отправляется в заголовке>
+
 демонизируем приложение
 
       cp wireguad_machine.service wrg_machine.service
